@@ -91,12 +91,12 @@ def ml(p: pd.Period) -> str:
     return f"{MOIS[p.month - 1]} {p.year}"
 
 
-def pct_delta(cur: float, prev: float):
-    """Texte de variation mensuelle, et couleur forcée si non calculable."""
+def pct_delta(cur: float, prev: float, label: str = "vs mois précédent"):
+    """Variation en %, et couleur forcée si le calcul est impossible."""
     if prev == 0:
-        return f"{fcfa(cur)} ce mois", "off"
+        return "Pas de base de comparaison", "off"
     v = (cur - prev) / abs(prev) * 100
-    return f"{v:+.1f} %".replace(".", ",") + f" · {fcfa(cur)} ce mois", None
+    return f"{v:+.1f} %".replace(".", ",") + f" {label}", None
 
 
 def total(d: pd.DataFrame, nature: str, only=None, skip=None) -> float:
@@ -223,9 +223,8 @@ def view_overview(ops: pd.DataFrame):
     kpi(k1, ":material/trending_down: Total des dépenses", fcfa(tot_dep), t, "off" if c else "inverse")
     t, c = pct_delta(float(res.get(cur, 0)), float(res.get(prev, 0)))
     kpi(k2, ":material/trending_up: Total des ressources", fcfa(tot_res), t, c)
-    kpi(k3, ":material/account_balance_wallet: Solde à date", fcfa(solde),
-        f"{fcfa(solde - solde_prev, True)} depuis fin {ml(prev)}",
-        None if solde != solde_prev else "off")
+    t, c = pct_delta(solde, solde_prev, f"vs fin {ml(prev)}")
+    kpi(k3, ":material/account_balance_wallet: Solde à date", fcfa(solde), t, c)
 
     with st.container(border=True):
         card_title("Dépenses et ressources dans le temps", "show_chart")
