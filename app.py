@@ -1,17 +1,16 @@
 from datetime import date
-from pathlib import Path
+import hmac
+from io import BytesIO
 
 import numpy as np
 import pandas as pd
 import streamlit as st
 from streamlit_echarts import JsCode, st_echarts
+from supabase import create_client
 
 # ───────────────────────── Configuration ─────────────────────────
 APP_NAME = "My portfolio"
-DATA_FILE = Path("data/my_portfolio.xlsx")
 COLS = ["ID", "Date", "Nature", "Catégorie", "Date échéance", "Libellé", "Montant"]
-DEFAULT_CATS = ["Transport", "Alimentation", "Connexion", "Emprunt", "Prêt", "Aide",
-                "Fourniture", "Service", "Bien de base", "Salaire", "Autre"]
 CAT_EMPRUNT = {"emprunt"}
 CAT_PRET = {"prêt", "pret"}
 CAT_FIN = CAT_EMPRUNT | CAT_PRET
@@ -53,27 +52,103 @@ h5 { font-weight: 700 !important; margin-bottom: .4rem; }
 """, unsafe_allow_html=True)
 
 
-# ───────────────────────── Données (Excel) ─────────────────────────
-def save(ops: pd.DataFrame, cats: list[str]) -> None:
-    DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with pd.ExcelWriter(DATA_FILE, engine="openpyxl",
-                        date_format="DD/MM/YYYY", datetime_format="DD/MM/YYYY") as w:
-        ops[COLS].to_excel(w, sheet_name="Operations", index=False)
-        pd.DataFrame({"Catégorie": cats}).to_excel(w, sheet_name="Categories", index=False)
+# ───────────────────────── Données (Supabase) ─────────────────────────
+PAGE = 1000  # Supabase renvoie au maximum 1000 lignes par requête
+
+
+def secret(name: str):
+    try:
+        return st.secrets[name]
+    except Exception:
+        return None
+
+
+@st.cache_resource
+def db():
+    return create_client(secret("SUPABASE_URL"), secret("SUPABASE_KEY"))
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_categories() -> pd.DataFrame:
+    r = db().table("categories").select("id,nom").order("nom").execute()
+    return pd.DataFrame(r.data, columns=["id", "nom"])
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_operations() -> pd.DataFrame:
+    rows, start = [], 0
+    while True:
+        r = (db().table("operations")
+             .select("id,date,nature,date_echeance,libelle,montant,categories(nom)")
+             .order("id").range(start, start + PAGE - 1).execute())
+        rows += r.data
+        if len(r.data) < PAGE:
+            break
+        start += PAGE
+    df = pd.DataFrame({
+        "ID": [x["id"] for x in rows],
+        "Date": [x["date"] for x in rows],
+        "Nature": [x["nature"] for x in rows],
+        "Catégorie": [(x.get("categories") or {}).get("nom", "") for x in rows],
+        "Date échéance": [x["date_echeance"] for x in rows],
+        "Libellé": [x["libelle"] or "" for x in rows],
+        "Montant": [x["montant"] for x in rows]})
+    df["ID"] = pd.to_numeric(df["ID"]).astype(int)
+    df["Date"] = pd.to_datetime(df["Date"])
+    df["Date échéance"] = pd.to_datetime(df["Date échéance"])
+    df["Montant"] = pd.to_numeric(df["Montant"]).astype(float)
+    return df
 
 
 def load() -> tuple[pd.DataFrame, list[str]]:
-    if not DATA_FILE.exists():
-        save(pd.DataFrame(columns=COLS), DEFAULT_CATS)
-    ops = pd.read_excel(DATA_FILE, sheet_name="Operations")
-    cats = pd.read_excel(DATA_FILE, sheet_name="Categories")["Catégorie"].dropna().astype(str).tolist()
-    ops["ID"] = pd.to_numeric(ops["ID"], errors="coerce").fillna(0).astype(int)
-    ops["Date"] = pd.to_datetime(ops["Date"], errors="coerce")
-    ops["Date échéance"] = pd.to_datetime(ops["Date échéance"], errors="coerce")
-    ops["Montant"] = pd.to_numeric(ops["Montant"], errors="coerce").fillna(0.0)
-    ops["Catégorie"] = ops["Catégorie"].astype(str)
-    ops["Libellé"] = ops["Libellé"].astype(str)
-    return ops.dropna(subset=["Date"]).reset_index(drop=True), cats
+    return fetch_operations(), fetch_categories()["nom"].tolist()
+
+
+def insert_operation(d, nature, cat, ech, lib, montant) -> None:
+    cmap = dict(zip(fetch_categories()["nom"], fetch_categories()["id"]))
+    db().table("operations").insert({
+        "date": d.isoformat(), "nature": nature, "categorie_id": int(cmap[cat]),
+        "date_echeance": ech.isoformat() if ech else None,
+        "libelle": lib, "montant": montant}).execute()
+    st.cache_data.clear()
+
+
+def delete_operations(ids: list[int]) -> None:
+    db().table("operations").delete().in_("id", [int(i) for i in ids]).execute()
+    st.cache_data.clear()
+
+
+def add_category(nom: str) -> None:
+    db().table("categories").insert({"nom": nom}).execute()
+    st.cache_data.clear()
+
+
+def delete_categories(noms: list[str]) -> None:
+    db().table("categories").delete().in_("nom", noms).execute()
+    st.cache_data.clear()
+
+
+def to_excel(ops: pd.DataFrame) -> bytes:
+    buf = BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl",
+                        date_format="DD/MM/YYYY", datetime_format="DD/MM/YYYY") as w:
+        ops[COLS].to_excel(w, sheet_name="Operations", index=False)
+    return buf.getvalue()
+
+
+def gate() -> None:
+    """Mot de passe facultatif (clé APP_PASSWORD dans les secrets)."""
+    pwd = secret("APP_PASSWORD")
+    if not pwd or st.session_state.get("auth"):
+        return
+    st.markdown(f"# :material/lock: {APP_NAME}")
+    typed = st.text_input("Mot de passe", type="password")
+    if typed:
+        if hmac.compare_digest(typed, str(pwd)):
+            st.session_state["auth"] = True
+            st.rerun()
+        st.error("Mot de passe incorrect.")
+    st.stop()
 
 
 def flash(msg: str) -> None:
@@ -183,14 +258,12 @@ def tab_saisie(ops: pd.DataFrame, cats: list[str]) -> pd.DataFrame:
             if not lib.strip() or mnt <= 0 or cat is None:
                 st.error("Renseignez un libellé, une catégorie et un montant supérieur à 0.")
             else:
-                new = pd.DataFrame([{
-                    "ID": (int(ops["ID"].max()) + 1) if not ops.empty else 1,
-                    "Date": pd.Timestamp(d), "Nature": nature, "Catégorie": cat,
-                    "Date échéance": pd.Timestamp(ech) if ech else pd.NaT,
-                    "Libellé": lib.strip(), "Montant": float(mnt)}])
-                ops = new if ops.empty else pd.concat([ops, new], ignore_index=True)
-                save(ops, cats)
-                st.toast("Opération enregistrée", icon=":material/check_circle:")
+                try:
+                    insert_operation(d, nature, cat, ech, lib.strip(), float(mnt))
+                    ops, _ = load()
+                    st.toast("Opération enregistrée", icon=":material/check_circle:")
+                except Exception as e:
+                    st.error(f"Échec de l'enregistrement : {e}")
 
     with right, st.container(border=True):
         card_title("Dernières saisies", "history")
@@ -410,25 +483,36 @@ def tab_reglages(ops: pd.DataFrame, cats: list[str]):
             elif name.lower() in [c.lower() for c in cats]:
                 st.error("Cette catégorie existe déjà.")
             else:
-                save(ops, cats + [name])
-                flash(f"Catégorie « {name} » ajoutée")
-                st.rerun()
+                try:
+                    add_category(name)
+                    flash(f"Catégorie « {name} » ajoutée")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Échec de l'ajout : {e}")
         r1, r2 = st.columns([3, 1], vertical_alignment="bottom")
         rem = r1.multiselect("Retirer des catégories", cats, key="rem_cat")
         if r2.button("Retirer", icon=":material/remove:", width="stretch", disabled=not rem):
-            used = ops["Catégorie"].isin(rem).sum()
-            save(ops, [c for c in cats if c not in rem])
-            flash(f"{len(rem)} catégorie(s) retirée(s)"
-                  + (f" ; {used} opération(s) conservent l'ancien nom" if used else ""))
-            st.rerun()
+            used = sorted(set(rem) & set(ops["Catégorie"]))
+            if used:
+                st.error("Catégorie(s) encore utilisée(s) par des opérations : " + ", ".join(used)
+                         + ". Supprimez ou modifiez ces opérations d'abord.")
+            else:
+                try:
+                    delete_categories(rem)
+                    flash(f"{len(rem)} catégorie(s) retirée(s)")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Échec de la suppression : {e}")
     with right, st.container(border=True):
         card_title("Base de données", "database")
         st.metric("Opérations enregistrées", len(ops))
-        st.caption(f"Fichier : {DATA_FILE}")
-        if DATA_FILE.exists():
-            st.download_button("Télécharger le fichier Excel", DATA_FILE.read_bytes(),
-                               file_name=DATA_FILE.name, icon=":material/download:",
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.caption("Stockage : Supabase (PostgreSQL)")
+        if st.button("Actualiser les données", icon=":material/refresh:"):
+            st.cache_data.clear()
+            st.rerun()
+        st.download_button("Exporter en Excel", to_excel(ops), file_name="my_portfolio.xlsx",
+                           icon=":material/download:",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
     with st.container(border=True):
         card_title("Supprimer des enregistrements", "delete")
@@ -453,20 +537,33 @@ def tab_reglages(ops: pd.DataFrame, cats: list[str]):
         ids = edited.loc[edited["Supprimer"], "ID"].tolist()
         if st.button(f"Supprimer la sélection ({len(ids)})", type="primary",
                      icon=":material/delete:", disabled=not ids):
-            save(ops[~ops["ID"].isin(ids)], cats)
-            st.session_state["del_n"] = st.session_state.get("del_n", 0) + 1
-            flash(f"{len(ids)} enregistrement(s) supprimé(s)")
-            st.rerun()
+            try:
+                delete_operations(ids)
+                st.session_state["del_n"] = st.session_state.get("del_n", 0) + 1
+                flash(f"{len(ids)} enregistrement(s) supprimé(s)")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Échec de la suppression : {e}")
 
 
 # ───────────────────────── Application ─────────────────────────
 if "flash" in st.session_state:
     st.toast(st.session_state.pop("flash"), icon=":material/check_circle:")
 
+if not (secret("SUPABASE_URL") and secret("SUPABASE_KEY")):
+    st.error("Connexion Supabase non configurée : renseignez SUPABASE_URL et SUPABASE_KEY "
+             "dans .streamlit/secrets.toml (voir secrets.toml.example).")
+    st.stop()
+gate()
+
 st.markdown(f"# :material/account_balance_wallet: {APP_NAME}")
 st.caption("Vos dépenses et vos ressources, de la saisie jusqu'au bilan.")
 
-ops, cats = load()
+try:
+    ops, cats = load()
+except Exception as e:
+    st.error(f"Impossible de lire la base Supabase : {e}")
+    st.stop()
 t_saisie, t_dash, t_reg = st.tabs([":material/add_circle: Enregistrer",
                                    ":material/dashboard: Tableau de bord",
                                    ":material/settings: Réglages"])

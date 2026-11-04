@@ -1,5 +1,6 @@
 streamlit>=1.50
 streamlit-echarts
+supabase
 pandas
 numpy
 openpyxl
