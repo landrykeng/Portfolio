@@ -377,13 +377,9 @@ def view_overview(ops: pd.DataFrame):
             days = pd.date_range(start, today)
             daily = (sel.groupby([sel["Date"].dt.normalize(), "Catégorie"])["Montant"].sum()
                      .unstack(fill_value=0).reindex(index=days, columns=cat_order, fill_value=0))
-            series = [{"name": c, "type": "line", "smooth": True, "showSymbol": False,
-                       "symbolSize": 7, "lineStyle": {"width": 3},
-                       "areaStyle": {"opacity": 0.08}, "emphasis": {"focus": "series"},
+            series = [{"name": c, "type": "bar", "stack": "jour", "barMaxWidth": 24,
                        "data": daily[c].round(0).tolist()} for c in cat_order]
             opt = base_option(days.strftime("%d/%m").tolist(), series, colors)
-            opt["xAxis"]["boundaryGap"] = False
-            opt["tooltip"]["axisPointer"] = {"type": "line"}
             opt["tooltip"]["formatter"] = DAILY_TIP
             opt["legend"]["type"] = "scroll"
             opt["legend"]["left"] = 0
