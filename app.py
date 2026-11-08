@@ -24,6 +24,16 @@ AX_FMT = JsCode("function(v){var a=Math.abs(v);"
                 "if(a>=1000000){return (v/1000000)+' M'}"
                 "if(a>=1000){return (v/1000)+' k'}return v}").js_code
 TIP_FMT = JsCode("function(v){return Number(v).toLocaleString('fr-FR')+' FCFA'}").js_code
+DAILY_TIP = JsCode(
+    "function(ps){var t=0,h=ps[0].axisValueLabel+'<br/>';"
+    "ps.forEach(function(p){if(p.value){t+=p.value;"
+    "h+=p.marker+p.seriesName+' : <b>'+Number(p.value).toLocaleString('fr-FR')+' FCFA</b><br/>'}});"
+    "return h+'Total : <b>'+t.toLocaleString('fr-FR')+' FCFA</b>'}").js_code
+PIE_TIP = JsCode(
+    "function(p){return p.marker+p.name+'<br/><b>'+Number(p.value).toLocaleString('fr-FR')"
+    "+' FCFA</b> ('+p.percent+' %)'}").js_code
+PALETTE = ["#3B5BDB", "#E5484D", "#0E7C66", "#C48A1A", "#8E4EC6", "#0091B2",
+           "#F76B15", "#D6409F", "#5C7C2F", "#6B7A90", "#2B8A8A", "#A45A52"]
 
 st.set_page_config(page_title=APP_NAME, page_icon=":material/account_balance_wallet:",
                    layout="wide")
@@ -344,6 +354,59 @@ def view_overview(ops: pd.DataFrame):
                 "Date": top["Date"].dt.strftime("%d/%m"), "Libellé": top["Libellé"],
                 "Catégorie": top["Catégorie"], "Montant": top["Montant"].map(fcfa)}),
                 hide_index=True, width="stretch")
+
+    periode = st.segmented_control(
+        "Période d'analyse des dépenses", ["Mois en cours", "30 jours", "90 jours", "Tout"],
+        default="30 jours", key="periode") or "30 jours"
+    starts = {"Mois en cours": cur.start_time,
+              "30 jours": today - pd.Timedelta(days=29),
+              "90 jours": today - pd.Timedelta(days=89),
+              "Tout": dd["Date"].min() if not dd.empty else today}
+    start = pd.Timestamp(starts[periode]).normalize()
+    sel = dd[dd["Date"] >= start]
+    by_cat = sel.groupby("Catégorie")["Montant"].sum().sort_values(ascending=False)
+    cat_order = by_cat.index.tolist()
+    colors = [PALETTE[i % len(PALETTE)] for i in range(len(cat_order))]
+
+    a, b = st.columns([3, 2], gap="medium")
+    with a, st.container(border=True):
+        card_title("Évolution journalière des dépenses par catégorie", "stacked_bar_chart")
+        if sel.empty:
+            st.caption("Aucune dépense sur cette période.")
+        else:
+            days = pd.date_range(start, today)
+            daily = (sel.groupby([sel["Date"].dt.normalize(), "Catégorie"])["Montant"].sum()
+                     .unstack(fill_value=0).reindex(index=days, columns=cat_order, fill_value=0))
+            series = [{"name": c, "type": "bar", "stack": "jour", "barMaxWidth": 24,
+                       "data": daily[c].round(0).tolist()} for c in cat_order]
+            opt = base_option(days.strftime("%d/%m").tolist(), series, colors)
+            opt["tooltip"]["formatter"] = DAILY_TIP
+            opt["legend"]["type"] = "scroll"
+            opt["legend"]["left"] = 0
+            opt["dataZoom"] = [{"type": "inside"}]
+            st_echarts(opt, height="360px", key="daily")
+    with b, st.container(border=True):
+        card_title("Répartition des dépenses par catégorie", "donut_large")
+        if sel.empty:
+            st.caption("Aucune dépense sur cette période.")
+        else:
+            opt = {
+                "color": colors,
+                "tooltip": {"trigger": "item", "formatter": PIE_TIP},
+                "legend": {"bottom": 0, "type": "scroll", "icon": "circle",
+                           "textStyle": {"color": "#16202F", "fontWeight": 600}},
+                "graphic": [{"type": "text", "left": "center", "top": 138,
+                             "style": {"text": "Total\n" + fcfa(float(by_cat.sum())),
+                                       "textAlign": "center", "fill": "#16202F",
+                                       "fontSize": 15, "fontWeight": 700}}],
+                "series": [{"type": "pie", "radius": ["54%", "76%"], "center": ["50%", "46%"],
+                            "avoidLabelOverlap": True,
+                            "itemStyle": {"borderRadius": 8, "borderColor": "#fff", "borderWidth": 3},
+                            "label": {"show": False},
+                            "emphasis": {"scale": True, "scaleSize": 6},
+                            "data": [{"name": c, "value": float(v)} for c, v in by_cat.items()]}],
+            }
+            st_echarts(opt, height="360px", key="donut")
 
     a, b = st.columns([3, 2], gap="medium")
     with a, st.container(border=True):
